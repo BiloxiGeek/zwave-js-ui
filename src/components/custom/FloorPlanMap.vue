@@ -73,6 +73,13 @@
 				yet, use Edit to place them
 			</v-chip>
 		</div>
+		<mesh-health-card
+			v-if="showHealth"
+			:items="healthItems"
+			:weak-hops="visible.hops.length"
+			:one-way="visible.oneWay.length"
+			@select="selectHealth"
+		/>
 	</div>
 </template>
 
@@ -81,6 +88,7 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { protocolDataRateToString } from '@zwave-js/core'
 import ConfigApis from '@/apis/ConfigApis.js'
+import MeshHealthCard from '@/components/custom/MeshHealthCard.vue'
 import MeshLegend from '@/components/custom/MeshLegend.vue'
 import { escapeHtml } from '@/lib/accessControl.ts'
 import { plural } from '@/lib/utils.js'
@@ -102,6 +110,7 @@ import {
 	rateColor,
 	rssiLabel,
 	statusOf,
+	visibleHealth,
 } from '@/lib/meshView.js'
 
 // map view layers saved with each map, with their labels
@@ -146,7 +155,7 @@ function polygon(cx, cy, r, count, inner = null) {
 
 export default {
 	name: 'FloorPlanMap',
-	components: { MeshLegend },
+	components: { MeshHealthCard, MeshLegend },
 	props: {
 		/** the floorplan map to show */
 		map: { type: Object, required: true },
@@ -172,6 +181,14 @@ export default {
 		// a background picture that couldn't be loaded: its file name
 		'image-error',
 	],
+	data() {
+		return {
+			// the health card shows with the Mesh health layer
+			showHealth: false,
+			// the health marks drawn on this map, see visibleHealth
+			visible: { hops: [], oneWay: [] },
+		}
+	},
 	computed: {
 		/** colors the CSS uses, from meshView.js */
 		cssVars() {
@@ -199,6 +216,22 @@ export default {
 		},
 		health() {
 			return meshHealth(this.physicalNodes)
+		},
+		/** flagged nodes shown on this map, worst first */
+		healthItems() {
+			const shown = new Map(
+				this.entries
+					.filter((e) => e.shown)
+					.map((e) => [e.node.id, e.node]),
+			)
+			return [...this.health.nodes]
+				.filter(([id]) => shown.has(id))
+				.map(([id, f]) => ({ id, label: labelOf(shown.get(id)), ...f }))
+				.sort(
+					(a, b) =>
+						(a.level === 'bad' ? 0 : 1) -
+							(b.level === 'bad' ? 0 : 1) || a.id - b.id,
+				)
 		},
 		unplacedCount() {
 			return this.entries.filter((e) => e.shown && !e.placed).length
@@ -283,6 +316,10 @@ export default {
 					'show-names',
 					e.type === 'overlayadd',
 				)
+			}
+			// the health layer also shows the health card
+			if (e.layer === this.groups.health) {
+				this.showHealth = e.type === 'overlayadd'
 			}
 		})
 		lmap.on('click', () => this.$emit('node-click', null))
@@ -471,6 +508,14 @@ export default {
 			this.drawLinks(view.links, view.pos)
 			this.drawGhosts(view.ghosts)
 			this.drawNodes(nodePos)
+			// what the "!" marks, dotted lines and the health card count
+			this.visible = visibleHealth(
+				this.health,
+				view.links,
+				new Set(nodePos.keys()),
+			)
+			// for jumping to a node from the health card
+			this.lastPos = view.pos
 			this.drawHealth(nodePos, view.pos)
 			this.drawBattery(nodePos)
 		},
@@ -538,6 +583,7 @@ export default {
 					'show-names',
 					this.lmap.hasLayer(this.groups.names),
 				)
+			this.showHealth = this.lmap.hasLayer(this.groups.health)
 			this.fitted = true
 			// moveend fires after this returns, so let it pass first
 			setTimeout(() => {
@@ -721,6 +767,13 @@ export default {
 					)
 			}
 		},
+		/** health card click: show the node on the map and open its panel */
+		selectHealth(id) {
+			const p = this.lastPos?.get(id)
+			if (p) this.lmap.setView(p, Math.max(this.lmap.getZoom(), 0))
+			const node = this.physicalNodes.find((n) => n.id === id)
+			if (node) this.$emit('node-click', node)
+		},
 		/** a ring around flagged nodes, "!" on weak hops, dotted one-way neighbor lines */
 		drawHealth(nodePos, allPos) {
 			const h = this.health
@@ -740,8 +793,7 @@ export default {
 					})
 					.addTo(this.groups.health)
 			}
-			for (const hop of h.hops) {
-				if (hop.kind !== 'lwr') continue
+			for (const hop of this.visible.hops) {
 				const a = allPos.get(hop.a)
 				const b = allPos.get(hop.b)
 				if (!a || !b) continue
@@ -760,7 +812,7 @@ export default {
 					)
 					.addTo(this.groups.health)
 			}
-			for (const w of h.oneWay) {
+			for (const w of this.visible.oneWay) {
 				const a = nodePos.get(w.from)
 				const b = nodePos.get(w.to)
 				if (!a || !b) continue

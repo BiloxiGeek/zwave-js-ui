@@ -16,6 +16,7 @@ import {
 	rssiLabel,
 	statusOf,
 	toRssi,
+	visibleHealth,
 } from './meshView.js'
 
 // store node objects, values from a live 11.24.2 mesh (2026-10-09)
@@ -298,6 +299,45 @@ describe('meshView', () => {
 			node(2, { lwr: route([], 125, [], 3) }),
 		])
 		expect(h3.nodes.get(2).level).toBe('bad')
+	})
+
+	it('limits weak hops and one-way entries to what the map draws', () => {
+		const mesh = [
+			node(1, { isControllerNode: true, neighbors: [2, 3, 4] }),
+			// weak hop 1-2
+			node(2, { lwr: route([], -90, [], 3), neighbors: [1, 3] }),
+			// weak hop 1-3; 2 lists 3, 3 doesn't list 2
+			node(3, { lwr: route([], -90, [], 3), neighbors: [1] }),
+			node(4, { lwr: route([], -60, [], 3), neighbors: [1] }),
+		]
+		const h = meshHealth(mesh)
+		expect(h.hops).toHaveLength(2)
+		expect(h.oneWay).toEqual([{ from: 2, to: 3 }])
+		// only 1 and 2 placed: 3's route and the 2→3 entry aren't drawn
+		const view = mapView(
+			mesh,
+			new Set([1, 2, 3, 4]),
+			new Map([
+				[1, [0, 0]],
+				[2, [0, 100]],
+			]),
+		)
+		const v = visibleHealth(h, view.links, new Set([1, 2]))
+		expect(v.hops.map((x) => [x.a, x.b])).toEqual([[1, 2]])
+		expect(v.oneWay).toEqual([])
+		// with 3 placed too, both show
+		const all = mapView(
+			mesh,
+			new Set([1, 2, 3, 4]),
+			new Map([
+				[1, [0, 0]],
+				[2, [0, 100]],
+				[3, [0, 200]],
+			]),
+		)
+		const v2 = visibleHealth(h, all.links, new Set([1, 2, 3]))
+		expect(v2.hops).toHaveLength(2)
+		expect(v2.oneWay).toEqual([{ from: 2, to: 3 }])
 	})
 
 	it('battery tag levels and report ages', () => {

@@ -406,6 +406,28 @@ export function meshHealth(nodes) {
 }
 
 /**
+ * The part of `health` (from meshHealth) a floorplan map shows: weak hops on
+ * the route lines it draws (`links` from mapView), and one-way neighbor
+ * entries between nodes drawn on it (`nodeIds`). The map's "!" marks, dotted
+ * lines and the health card's counts all use this, so they agree.
+ */
+export function visibleHealth(health, links, nodeIds) {
+	const drawn = new Set(
+		links
+			.filter((l) => l.kind === 'lwr')
+			.map((l) => linkKey('lwr', l.a, l.b)),
+	)
+	return {
+		hops: health.hops.filter(
+			(h) => h.kind === 'lwr' && drawn.has(linkKey('lwr', h.a, h.b)),
+		),
+		oneWay: health.oneWay.filter(
+			(w) => nodeIds.has(w.from) && nodeIds.has(w.to),
+		),
+	}
+}
+
+/**
  * Starting spots for nodes not placed yet: a grid along the bottom of the
  * canvas, filled bottom row first, sorted by location, name and ID. Grid
  * cells near an already placed node (`occupied`, [x, y] canvas px) are
