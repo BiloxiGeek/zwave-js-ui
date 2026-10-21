@@ -29,7 +29,7 @@
 						<v-list-item-subtitle
 							v-for="(r, i) in item.reasons"
 							:key="i"
-							class="text-caption"
+							class="text-caption mesh-health-reason"
 							>{{ r }}</v-list-item-subtitle
 						>
 					</v-list-item>
@@ -122,5 +122,13 @@ export default {
 	max-height: 50vh;
 	overflow-y: auto;
 	align-self: stretch;
+}
+
+/* reasons wrap instead of being cut to one line (beats Vuetify's
+   .v-list-item--one-line clamp) */
+.mesh-health-card .mesh-health-reason {
+	-webkit-line-clamp: unset;
+	line-clamp: unset;
+	white-space: normal;
 }
 </style>
