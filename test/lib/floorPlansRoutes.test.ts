@@ -184,6 +184,86 @@ describe('floorplans API', () => {
 		})
 	})
 
+	it('exports and imports maps', async () => {
+		const { data: map } = await api('POST', '/maps', { name: 'Loft' })
+		await upload(map.id, PNG1)
+		await api('PUT', `/maps/${map.id}/placements`, {
+			placements: [
+				{ deviceKey: K(5), x: 1, y: 1 },
+				{ deviceKey: K(6), x: 2, y: 2 },
+			],
+		})
+
+		const exported = await api('GET', `/export?maps=${map.id}`)
+		expect(exported.success).toBe(true)
+		const file = exported.data
+		expect(file.maps.map((m) => m.name)).toEqual(['Loft'])
+		expect(file.nodes.map((n) => n.nodeId)).toEqual([5, 6])
+		expect(await api('GET', '/export?maps=nope')).toEqual({
+			success: false,
+			message: 'No such map',
+		})
+
+		const importFile = (body: string | null, matches?: unknown) => {
+			const form = new FormData()
+			if (body !== null) {
+				form.append('upload', new Blob([body]), 'f.json')
+			}
+			if (matches !== undefined) {
+				form.append('matches', JSON.stringify(matches))
+			}
+			return fetch(`${url}/api/floorplans/import`, {
+				method: 'POST',
+				headers: { Accept: 'application/json' },
+				body: form,
+			}).then((r) => r.json())
+		}
+
+		const res = await importFile(JSON.stringify(file), {
+			n1: K(7),
+			n2: null,
+		})
+		expect(res.success).toBe(true)
+		expect(res.data.maps[0].name).toBe('Loft (imported)')
+		expect(res.data.maps[0].placements).toEqual([
+			{ deviceKey: K(7), x: 1, y: 1 },
+		])
+		expect(res.data.skipped).toMatchObject([
+			{ ref: 'n2', nodeId: 6, maps: ['Loft (imported)'] },
+		])
+
+		// a match for a node the file doesn't have
+		expect(
+			await importFile(JSON.stringify(file), {
+				n1: null,
+				n2: null,
+				n3: K(8),
+			}),
+		).toEqual({ success: false, message: 'No node "n3" in the file' })
+		// no file, a file that isn't one, no or bad matches
+		expect(await importFile(null, {})).toEqual({
+			success: false,
+			message: 'No file uploaded',
+		})
+		expect(await importFile('garbage', {})).toEqual({
+			success: false,
+			message: "That isn't a floorplan file (not JSON)",
+		})
+		expect(await importFile(JSON.stringify(file))).toEqual({
+			success: false,
+			message: 'matches must be JSON',
+		})
+		expect(await importFile(JSON.stringify(file), 'nope')).toMatchObject({
+			success: false,
+			message: expect.stringContaining('matches must map'),
+		})
+		// nothing was added by the failed imports
+		const { data } = await api('GET', '')
+		expect(data.maps.filter((m) => m.name.startsWith('Loft'))).toHaveLength(
+			2,
+		)
+	})
+
 	it('uploads, serves and removes background images', async () => {
 		const { data: map } = await api('POST', '/maps', { name: 'Shop' })
 		const set = await upload(map.id, PNG1)
@@ -323,6 +403,8 @@ describe('floorplans API', () => {
 			['PUT', '/maps/x/placements'],
 			['DELETE', `/maps/x/placements/${K(2)}`],
 			['GET', '/images/x.png'],
+			['GET', '/export'],
+			['POST', '/import'],
 		]
 		await setAuth(true)
 		try {

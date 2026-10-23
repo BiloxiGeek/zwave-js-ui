@@ -51,6 +51,13 @@ import * as utils from './lib/utils.ts'
 import backupManager from './lib/BackupManager.ts'
 import floorPlans, { MAX_IMAGE_BYTES, MAX_IMAGE_MB } from './lib/FloorPlans.ts'
 import {
+	MAX_FILE_BYTES as MAX_FLOOR_PLAN_FILE_BYTES,
+	MAX_FILE_MB as MAX_FLOOR_PLAN_FILE_MB,
+	buildExport,
+	localNodes,
+	parseImport,
+} from './lib/FloorPlanExchange.ts'
+import {
 	getExternallyManagedPaths,
 	loadExternalSettings,
 	mergeExternalSettings,
@@ -126,6 +133,11 @@ const multerUpload = multer({
 const floorPlanImageUpload = multer({
 	storage: memoryStorage(),
 	limits: { fileSize: MAX_IMAGE_BYTES, files: 1 },
+}).single('upload')
+
+const floorPlanFileUpload = multer({
+	storage: memoryStorage(),
+	limits: { fileSize: MAX_FLOOR_PLAN_FILE_BYTES, files: 1 },
 }).single('upload')
 
 const FileStore = sessionStore(session)
@@ -2291,6 +2303,57 @@ app.delete(
 	floorPlansRoute((req) =>
 		floorPlans.removePlacement(req.params.id, req.params.deviceKey),
 	),
+)
+
+// ?maps=id1,id2 (default: all maps). The UI names the file and saves it.
+app.get(
+	'/api/floorplans/export',
+	apisLimiter,
+	isAuthenticated,
+	floorPlansRoute(async (req) => {
+		const ids =
+			typeof req.query.maps === 'string' && req.query.maps
+				? req.query.maps.split(',')
+				: null
+		return buildExport({
+			data: await floorPlans.load(),
+			mapIds: ids,
+			nodes: localNodes(gw?.zwave),
+			imagesDir: floorPlans.imagesDir,
+			homeId: gw?.zwave?.homeHex?.replace(/^0x/, '') || null,
+			appVersion: utils.getVersion(),
+		})
+	}),
+)
+
+// multipart: `upload` export file, `matches` JSON { [ref]: deviceKey | null }
+// with the user's decision for every node in it. Adds new maps, never
+// overwrites existing ones.
+app.post(
+	'/api/floorplans/import',
+	apisLimiter,
+	isAuthenticated,
+	floorPlansRoute(async (req, res) => {
+		try {
+			await multerPromise(floorPlanFileUpload, req, res)
+		} catch (error) {
+			if (error.code === 'LIMIT_FILE_SIZE') {
+				throw Error(`File is larger than ${MAX_FLOOR_PLAN_FILE_MB} MB`)
+			}
+			throw error
+		}
+		if (!req.file) throw Error('No file uploaded')
+		let matches: unknown
+		try {
+			matches = JSON.parse(req.body.matches)
+		} catch {
+			throw Error('matches must be JSON')
+		}
+		return floorPlans.importMaps(
+			parseImport(req.file.buffer),
+			matches as Record<string, string | null>,
+		)
+	}),
 )
 
 // Background image file. Served by file name: the dot keeps the history

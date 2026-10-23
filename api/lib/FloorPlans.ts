@@ -8,6 +8,11 @@
 import { cp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { floorPlansDir } from '../config/app.ts'
+import type {
+	FileNode,
+	ImportedMap,
+	ParsedImport,
+} from './FloorPlanExchange.ts'
 import { module } from './logger.ts'
 import { ensureDir, generateId } from './utils.ts'
 
@@ -99,12 +104,12 @@ const empty = (): FloorPlansData => ({
 })
 
 const DIM_RULE = `a whole number 1-${MAX_DIMENSION}`
-const isDim = (n: unknown): n is number =>
+export const isDim = (n: unknown): n is number =>
 	Number.isInteger(n) && (n as number) > 0 && (n as number) <= MAX_DIMENSION
-const isCoord = (n: unknown): n is number =>
+export const isCoord = (n: unknown): n is number =>
 	typeof n === 'number' && Number.isFinite(n)
 const clamp = (n: number, max: number) => Math.min(Math.max(n, 0), max)
-const cleanName = (name: unknown, fallback: string) =>
+export const cleanName = (name: unknown, fallback: string) =>
 	(typeof name === 'string' && name ? name : fallback).slice(
 		0,
 		MAX_NAME_LENGTH,
@@ -289,6 +294,19 @@ export interface AddMapOptions {
 	widthPx?: number
 	heightPx?: number
 	nodes?: NodeFilter
+}
+
+/** A file entry whose positions an import left out: matched to no node here */
+export interface SkippedEntry extends FileNode {
+	/** names of the imported maps it was on */
+	maps: string[]
+}
+
+export interface ImportResult {
+	maps: FloorPlanMap[]
+	/** placements made */
+	placed: number
+	skipped: SkippedEntry[]
 }
 
 export interface MapChanges {
@@ -715,6 +733,129 @@ export class FloorPlans {
 				(p) => p.deviceKey !== deviceKey,
 			)
 		})
+	}
+
+	// ------------------------------------------------------------- import
+
+	/**
+	 * Add the maps of a parsed export file (FloorPlanExchange.parseImport),
+	 * given the user's decision for every node entry: a device key, or null
+	 * to leave it out. Entries left out are returned in `skipped` with what
+	 * the file says about them. Never overwrites: a taken name gets
+	 * " (imported)", then " (imported 2)" and so on.
+	 */
+	async importMaps(
+		file: ParsedImport,
+		matches: Record<string, string | null>,
+	): Promise<ImportResult> {
+		if (!matches || typeof matches !== 'object') {
+			throw Error(
+				'matches must map each node ref to a device key or null',
+			)
+		}
+		const refs = new Set(file.nodes.map((e) => e.ref))
+		for (const ref of Object.keys(matches)) {
+			if (!refs.has(ref)) throw Error(`No node "${ref}" in the file`)
+		}
+		const used = new Set<string>()
+		for (const e of file.nodes) {
+			const label = e.name ?? e.ref
+			if (!Object.hasOwn(matches, e.ref)) {
+				throw Error(`No decision for "${label}"`)
+			}
+			const key = matches[e.ref]
+			if (key === null) continue
+			if (typeof key !== 'string' || !DEVICE_KEY.test(key)) {
+				throw Error(`Bad device for "${label}"`)
+			}
+			if (used.has(key)) {
+				throw Error('The same device is chosen for two entries')
+			}
+			used.add(key)
+		}
+
+		return this.update(async (data, files) => {
+			const taken = new Set(data.maps.map((m) => m.name))
+			const freeName = (wanted: string) => {
+				let name = wanted
+				for (let i = 1; taken.has(name); i++) {
+					const suffix = i === 1 ? ' (imported)' : ` (imported ${i})`
+					name =
+						wanted.slice(0, MAX_NAME_LENGTH - suffix.length) +
+						suffix
+				}
+				taken.add(name)
+				return name
+			}
+			const result: ImportResult = { maps: [], placed: 0, skipped: [] }
+			const skipped = new Map<string, SkippedEntry>()
+			for (const m of file.maps) {
+				const map = await this.importedMap(
+					m,
+					freeName(m.name),
+					matches,
+					files,
+				)
+				data.maps.push(map)
+				result.maps.push(map)
+				result.placed += map.placements.length
+				for (const { ref } of m.placements) {
+					if (matches[ref] !== null) continue
+					if (!skipped.has(ref)) {
+						const e = file.nodes.find((n) => n.ref === ref)
+						skipped.set(ref, { ...e, maps: [] })
+					}
+					const s = skipped.get(ref)
+					if (!s.maps.includes(map.name)) s.maps.push(map.name)
+				}
+			}
+			result.skipped = [...skipped.values()]
+			return result
+		})
+	}
+
+	/** One imported map, its pictures written and its nodes remapped */
+	private async importedMap(
+		m: ImportedMap,
+		name: string,
+		matches: Record<string, string | null>,
+		files: FileChanges,
+	) {
+		const map: FloorPlanMap = {
+			id: generateId(),
+			name,
+			widthPx: m.widthPx,
+			heightPx: m.heightPx,
+			background: null,
+			nodes: {
+				start: m.nodes.start,
+				exceptions: m.nodes.exceptionRefs
+					.map((ref) => matches[ref])
+					.filter(Boolean),
+			},
+			view: checkView(m.view),
+			placements: [],
+		}
+		if (m.background) {
+			const { image, darkImage, imageRect } = m.background
+			map.background = {
+				image:
+					image && (await this.writeImage(map, false, image, files)),
+				darkImage:
+					darkImage &&
+					(await this.writeImage(map, true, darkImage, files)),
+				imageRect: { ...imageRect },
+			}
+		}
+		for (const p of m.placements) {
+			const deviceKey = matches[p.ref]
+			if (deviceKey) {
+				map.placements.push(
+					toPlacement(map, { deviceKey, x: p.x, y: p.y }),
+				)
+			}
+		}
+		return map
 	}
 }
 
