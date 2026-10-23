@@ -80,6 +80,15 @@
 							}}</v-list-item-title>
 						</v-list-item>
 						<v-list-item
+							prepend-icon="download"
+							@click="exportMaps"
+						>
+							<v-list-item-title>Export…</v-list-item-title>
+						</v-list-item>
+						<v-list-item prepend-icon="upload" @click="importMaps">
+							<v-list-item-title>Import…</v-list-item-title>
+						</v-list-item>
+						<v-list-item
 							prepend-icon="delete"
 							base-color="error"
 							@click="deleteMap"
@@ -174,8 +183,20 @@
 				<v-btn color="primary" prepend-icon="add" @click="newMap"
 					>New map</v-btn
 				>
+				<v-btn
+					variant="outlined"
+					prepend-icon="upload"
+					@click="importMaps"
+					>Import</v-btn
+				>
 			</template>
 		</v-empty-state>
+		<dialog-floor-plan-import
+			v-model="showImport"
+			:file="importFile"
+			:content="importContent"
+			@imported="onImported"
+		/>
 	</div>
 </template>
 
@@ -187,6 +208,7 @@ import InstancesMixin from '../../mixins/InstancesMixin.js'
 import ConfigApis from '../../apis/ConfigApis.js'
 import { Settings } from '@/modules/Settings'
 import { escapeHtml } from '@/lib/accessControl.ts'
+import { download } from '@/lib/utils'
 
 const settings = new Settings(localStorage)
 
@@ -197,6 +219,9 @@ export default {
 		FloorPlanMap: defineAsyncComponent(
 			() => import('@/components/custom/FloorPlanMap.vue'),
 		),
+		DialogFloorPlanImport: defineAsyncComponent(
+			() => import('@/components/dialogs/DialogFloorPlanImport.vue'),
+		),
 	},
 	emits: ['node-click'],
 	data() {
@@ -205,6 +230,9 @@ export default {
 			floorPlans: { settings: {}, maps: [] },
 			loaded: false,
 			editing: false,
+			showImport: false,
+			importFile: null,
+			importContent: null,
 		}
 	},
 	computed: {
@@ -456,6 +484,152 @@ export default {
 			await this.floorPlanCall('remove the picture', () =>
 				ConfigApis.removeFloorPlanImage(map.id, { dark }),
 			)
+		},
+		async exportMaps() {
+			const today = new Date()
+			const pad = (n) => String(n).padStart(2, '0')
+			const fileName = `zwjsui_floorplan_${today.getFullYear()}${pad(today.getMonth() + 1)}${pad(today.getDate())}.json`
+			const several = this.floorPlans.maps.length > 1
+			// Chrome and Edge (on https or localhost) can ask where to save;
+			// elsewhere the browser decides, a page can't see the folder
+			const canPick = 'showSaveFilePicker' in window
+			const where = canPick
+				? 'Your browser asks where to save it.'
+				: "It goes to your browser's downloads folder, or your browser asks where to save it if it's set to ask."
+			const res = await this.app.confirm(
+				'Export floorplans',
+				`Saves the maps with their pictures and node positions, to import here or on another install. ${where}`,
+				'info',
+				{
+					confirmText: 'Export',
+					width: 450,
+					inputs: [
+						...(several
+							? [
+									{
+										type: 'list',
+										label: 'Maps',
+										key: 'which',
+										items: [
+											{
+												title: `This map (${this.currentMap.name})`,
+												value: 'current',
+											},
+											{
+												title: `All ${this.floorPlans.maps.length} maps`,
+												value: 'all',
+											},
+										],
+										default: 'current',
+									},
+								]
+							: []),
+						{
+							type: 'text',
+							label: 'File name',
+							key: 'fileName',
+							required: true,
+							default: fileName,
+						},
+					],
+				},
+			)
+			if (!res.fileName) return
+			const name = res.fileName.endsWith('.json')
+				? res.fileName
+				: `${res.fileName}.json`
+			// the save dialog needs the click that just happened, so it opens
+			// before the export is fetched
+			let handle = null
+			if (canPick) {
+				try {
+					handle = await window.showSaveFilePicker({
+						suggestedName: name,
+						types: [
+							{
+								description: 'Floorplan file',
+								accept: { 'application/json': ['.json'] },
+							},
+						],
+					})
+				} catch (error) {
+					if (error.name === 'AbortError') return
+					// not allowed here after all: fall back to a download
+				}
+			}
+			try {
+				const ids = res.which === 'all' ? [] : [this.currentMap.id]
+				const out = await ConfigApis.exportFloorPlans(ids)
+				if (!out.success) throw Error(out.message)
+				const blob = new Blob([JSON.stringify(out.data)], {
+					type: 'application/json',
+				})
+				if (handle) {
+					const writable = await handle.createWritable()
+					await writable.write(blob)
+					await writable.close()
+					this.showSnackbar(`Saved ${handle.name}`, 'success')
+				} else {
+					download(URL.createObjectURL(blob), name)
+					this.showSnackbar(
+						`Saved ${name} to your browser's downloads`,
+						'success',
+					)
+				}
+			} catch (error) {
+				this.showSnackbar(`Export failed: ${error.message}`, 'error')
+			}
+		},
+		async importMaps() {
+			const { file } = await this.app.confirm(
+				'Import floorplans',
+				'Choose a floorplan file exported from Z-Wave JS UI. You check the node matches before anything is added.',
+				'info',
+				{
+					confirmText: 'Next',
+					width: 450,
+					inputs: [
+						{
+							type: 'file',
+							label: 'Floorplan file',
+							key: 'file',
+							required: true,
+							accept: 'application/json,.json',
+						},
+					],
+				},
+			)
+			if (!file) return
+			// read here for the matching; the server checks it all on import
+			try {
+				const content = JSON.parse(await file.text())
+				if (
+					content?.format !== 'zwjsui-floorplan' ||
+					!Array.isArray(content.nodes) ||
+					!Array.isArray(content.maps)
+				) {
+					throw Error("it isn't a floorplan file")
+				}
+				this.importFile = file
+				this.importContent = content
+				this.showImport = true
+			} catch (error) {
+				this.showSnackbar(
+					`Can't import that file: ${error instanceof SyntaxError ? "it isn't JSON" : error.message}`,
+					'error',
+				)
+			}
+		},
+		async onImported({ maps, placed, skipped }) {
+			await this.loadFloorPlans()
+			if (maps.length) this.selectMap(maps[0].id)
+			// with devices left out, the dialog lists them
+			if (!skipped.length) {
+				this.showSnackbar(
+					`Imported ${maps.length} map${maps.length === 1 ? '' : 's'} with ${placed} node${placed === 1 ? '' : 's'} placed`,
+					'success',
+				)
+			}
 		},
 		onImageError(file) {
 			if (this.brokenImages.has(file)) return

@@ -334,6 +334,21 @@ export default {
 		)
 		return response.data
 	},
+	/** The export file of the given maps (all when empty) */
+	async exportFloorPlans(mapIds = []) {
+		const response = await request.get('/floorplans/export', {
+			params: mapIds.length ? { maps: mapIds.join(',') } : {},
+		})
+		return response.data
+	},
+	/** Import an export file with the user's `matches`: { [ref]: deviceKey | null } */
+	async importFloorPlans(file, matches) {
+		const form = new FormData()
+		form.append('upload', file)
+		form.append('matches', JSON.stringify(matches))
+		const response = await request.post('/floorplans/import', form)
+		return response.data
+	},
 	/** URL of a background image file, for <img> and map overlays */
 	floorPlanImageUrl(file) {
 		return `${axios.defaults.baseURL}/floorplans/images/${encodeURIComponent(file)}`
