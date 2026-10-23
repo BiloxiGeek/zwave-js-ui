@@ -30,7 +30,7 @@ export const FORMAT_VERSION = 2
  * Largest export or import file. An import is parsed in one go, which blocks
  * the server for a moment, so this stays well below what JSON could hold.
  */
-export const MAX_FILE_BYTES = 50 * 1024 * 1024
+export const MAX_FILE_BYTES = 55 * 1024 * 1024
 export const MAX_FILE_MB = MAX_FILE_BYTES / 1024 / 1024
 const MAX_MAPS = 50
 
